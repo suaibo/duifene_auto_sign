@@ -416,47 +416,42 @@ class SubmissionBoundaryTests(unittest.TestCase):
                 watcher._tick()
                 self.assertEqual(watcher._pending_numeric, {})
 
-    def test_headcount_cache_expires_and_rechecks_gate(self):
+    def test_headcount_gate_uses_latest_counts_each_attempt(self):
         self.api.fetch_headcount.side_effect = [(0, 10), (5, 10)]
-        clock = [0.0]
-        with patch("duifene.processor.time.monotonic", side_effect=lambda: clock[0]):
-            self.assertEqual(self.processor.process(self.activity, self.course), Outcome.DEFERRED)
-            clock[0] = 0.2
-            self.assertEqual(self.processor.process(self.activity, self.course), Outcome.DEFERRED)
-            clock[0] = 1.1
-            self.assertEqual(self.processor.process(self.activity, self.course), Outcome.SIGNED)
+        self.assertEqual(self.processor.process(self.activity, self.course), Outcome.DEFERRED)
+        self.assertEqual(self.processor.process(self.activity, self.course), Outcome.SIGNED)
         self.assertEqual(self.api.fetch_headcount.call_count, 2)
 
-    def test_headcount_cache_does_not_cross_activities(self):
-        self.api.fetch_headcount.return_value = (0, 10)
-        with patch("duifene.processor.time.monotonic", return_value=0.0):
-            self.processor.process(self.activity, self.course)
-            self.processor.process(replace(self.activity, activity_id="102"), self.course)
-        self.assertEqual(self.api.fetch_headcount.call_count, 2)
-
-    def test_reset_clears_headcount_cache(self):
-        self.api.fetch_headcount.return_value = (0, 10)
-        with patch("duifene.processor.time.monotonic", return_value=0.0):
-            self.processor.process(self.activity, self.course)
-            self.processor.reset()
-            self.processor.process(self.activity, self.course)
-        self.assertEqual(self.api.fetch_headcount.call_count, 2)
-
-    def test_headcount_cache_does_not_cross_student_identities(self):
-        self.api.fetch_headcount.return_value = (0, 10)
-        with patch("duifene.processor.time.monotonic", return_value=0.0):
-            self.processor.process(self.activity, self.course)
-            self.api.identity = AppIdentity("other", "other-self", "", "2")
-            self.processor.process(replace(self.activity, student_id="other-self"), self.course)
-        self.assertEqual(self.api.fetch_headcount.call_count, 2)
-
-    def test_failed_headcount_request_is_not_cached(self):
+    def test_failed_headcount_request_can_be_retried(self):
         self.api.fetch_headcount.side_effect = [AppApiError("人数请求失败"), (0, 10)]
-        with patch("duifene.processor.time.monotonic", return_value=0.0):
-            with self.assertRaises(AppApiError):
-                self.processor.process(self.activity, self.course)
-            self.assertEqual(self.processor.process(self.activity, self.course), Outcome.DEFERRED)
+        with self.assertRaises(AppApiError):
+            self.processor.process(self.activity, self.course)
+        self.assertEqual(self.processor.process(self.activity, self.course), Outcome.DEFERRED)
         self.assertEqual(self.api.fetch_headcount.call_count, 2)
+
+    def test_near_deadline_zero_total_is_refetched_before_window_closes(self):
+        activity = replace(self.activity, valid_date=(datetime.now(CHINA_TZ) + timedelta(seconds=3)).isoformat())
+        self.api.fetch_headcount.side_effect = [(0, 0), (1, 1)]
+        self.assertEqual(self.processor.process(activity, self.course), Outcome.DEFERRED)
+        self.assertEqual(self.processor.process(activity, self.course), Outcome.SIGNED)
+        self.assertEqual(self.api.fetch_headcount.call_count, 2)
+
+    def test_near_deadline_headcount_ratio_changes_are_used_immediately(self):
+        activity = replace(self.activity, valid_date=(datetime.now(CHINA_TZ) + timedelta(seconds=3)).isoformat())
+        self.api.fetch_headcount.side_effect = [(0, 10), (5, 10)]
+        self.assertEqual(self.processor.process(activity, self.course), Outcome.DEFERRED)
+        self.assertEqual(self.processor.process(activity, self.course), Outcome.SIGNED)
+        self.assertEqual(self.api.fetch_headcount.call_count, 2)
+
+    def test_qr_and_hanzi_submit_discovered_material_without_detail_refetch(self):
+        self.api.sign_by_qr.return_value = "签到成功"
+        qr = replace(self.activity, activity_id="qr", check_type="2", code="", qr_token="A" * 48)
+        hanzi = replace(self.activity, activity_id="hanzi", check_type="4", code="天地玄黄")
+        self.assertEqual(self.processor.process(qr, self.course), Outcome.SIGNED)
+        self.assertEqual(self.processor.process(hanzi, self.course), Outcome.SIGNED)
+        self.api.sign_by_qr.assert_called_once_with("A" * 48)
+        self.api.sign_by_code.assert_called_once_with("天地玄黄")
+        self.api.fetch_checkin.assert_not_called()
 
 
 class NumericRetryTests(unittest.TestCase):

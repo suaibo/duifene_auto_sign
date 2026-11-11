@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 import random
-import time
 
 from .api import DuifeneApi
 from .app_api import AppCheckIn
@@ -16,7 +15,6 @@ LOCATION_OFFSET_MIN_M = 5.0
 LOCATION_OFFSET_MAX_M = 20.0
 METERS_PER_DEGREE_LATITUDE = 111_132.92
 METERS_PER_DEGREE_LONGITUDE = 111_320.0
-HEADCOUNT_CACHE_TTL_S = 1.0
 
 
 class ActivityProcessor:
@@ -33,7 +31,6 @@ class ActivityProcessor:
         self._log = log
         self._handled: set[str] = set()
         self._headcount_log: dict[str, tuple[int, int]] = {}
-        self._headcount_cache: dict[tuple[str, str, str], tuple[float, tuple[int, int]]] = {}
         self._result_logged: set[str] = set()
         self._wait_logged: set[tuple[str, str]] = set()
 
@@ -41,7 +38,6 @@ class ActivityProcessor:
         """清空跨轮次状态。"""
         self._handled.clear()
         self._headcount_log.clear()
-        self._headcount_cache.clear()
         self._result_logged.clear()
         self._wait_logged.clear()
 
@@ -106,14 +102,7 @@ class ActivityProcessor:
         course: Course,
     ) -> Outcome | None:
         """人数门禁：需等待时返回 DEFERRED，可提交时返回 None。"""
-        cache_key = (activity.student_id, activity.class_id, activity.activity_id)
-        cached = self._headcount_cache.get(cache_key)
-        if cached is not None and time.monotonic() - cached[0] < HEADCOUNT_CACHE_TTL_S:
-            counts = cached[1]
-        else:
-            counts = self._api.fetch_headcount(activity.activity_id)
-            self._headcount_cache[cache_key] = (time.monotonic(), counts)
-        signed, total = counts
+        signed, total = self._api.fetch_headcount(activity.activity_id)
         if total <= 0:
             return Outcome.DEFERRED
         if total < self._settings.small_class_max:
@@ -167,15 +156,8 @@ class ActivityProcessor:
         return outcome
 
     def _sign_code(self, activity: AppCheckIn, course: Course) -> Outcome:
-        """提交签到码。"""
+        """提交已由 process 校验的签到码。"""
         code = activity.code
-        if len(code) != 4:
-            self._log_wait(
-                activity.activity_id,
-                "未返回有效签到码",
-                course,
-            )
-            return Outcome.DEFERRED
         self._log_attempt(
             activity.activity_id,
             course,
@@ -188,18 +170,8 @@ class ActivityProcessor:
         )
 
     def _sign_qr(self, activity: AppCheckIn, course: Course) -> Outcome:
-        """提交二维码令牌。"""
+        """提交已由 process 校验的二维码令牌。"""
         token = activity.qr_token
-        if not token:
-            detail = self._api.fetch_checkin(activity.activity_id)
-            token = detail.qr_token if detail is not None else ""
-        if not token:
-            self._log_wait(
-                activity.activity_id,
-                "未返回二维码令牌",
-                course,
-            )
-            return Outcome.DEFERRED
         self._log_attempt(
             activity.activity_id,
             course,
@@ -212,18 +184,8 @@ class ActivityProcessor:
         )
 
     def _sign_hanzi(self, activity: AppCheckIn, course: Course) -> Outcome:
-        """提交汉字签到答案。"""
+        """提交已由 process 校验的汉字签到答案。"""
         answer = activity.code
-        if len(answer) != 4:
-            detail = self._api.fetch_checkin(activity.activity_id)
-            answer = detail.code if detail is not None else ""
-        if len(answer) != 4:
-            self._log_wait(
-                activity.activity_id,
-                "未返回有效汉字答案",
-                course,
-            )
-            return Outcome.DEFERRED
         self._log_attempt(
             activity.activity_id,
             course,

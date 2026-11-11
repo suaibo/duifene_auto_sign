@@ -188,15 +188,16 @@ class Watcher:
         return 0 < remaining <= NUMERIC_PRIORITY_WINDOW_S
 
     def _set_pending_numeric(self, activities: list[AppCheckIn]) -> None:
-        if not activities or not self._pending_numeric.keys() & {a.activity_id for a in activities}:
+        pending = {a.activity_id: a for a in activities}
+        if not self._pending_numeric.keys() & pending.keys():
             self._numeric_failures = 0
-        self._pending_numeric = {a.activity_id: a for a in activities}
+        self._pending_numeric = pending
         self._numeric_deadline = min(
             (parse_checkin_time(a.valid_date) for a in activities), default=None,
         )
 
     def _numeric_tick(self) -> None:
-        """快速取码只读网页材料；不重跑学生记录与 App 详情发现。"""
+        """刷新网页材料并处理候选；不重跑学生记录与 App 详情发现。"""
         self._last_tick_ts = time.time()
         if self._stop.is_set():
             return
